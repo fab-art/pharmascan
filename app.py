@@ -226,7 +226,7 @@ def load_and_process(file_bytes: bytes, filename: str, rapid_days: int):
     elif fname.endswith((".xlsx", ".xls")):
         df = _load_excel(file_bytes, filename)
     elif fname.endswith(".ods"):
-        df = pd.read_excel(io.BytesIO(file_bytes), engine="odf", dtype_backend="numpy_nullable")
+        df = pd.read_excel(io.BytesIO(file_bytes), engine="odf")
     else:
         raise ValueError(f"Unsupported format: {fname.rsplit('.',1)[-1].upper()}. "
                          "Use CSV, XLSX, XLS, or ODS.")
@@ -3237,6 +3237,47 @@ with st.spinner("Analysing voucher data…"):
         st.stop()
 
 
+
+def _render_sidebar_perf(s: dict, df: pd.DataFrame):
+    """Render performance and data quality info in sidebar."""
+    st.markdown("---")
+    st.markdown("**📊 Data Quality**")
+    mb      = s.get("source_mb", 0)
+    rows    = s.get("total_rows", len(df))
+    mem_mb  = df.memory_usage(deep=True).sum() / 1_048_576
+    null_pct = df.isna().mean().mean() * 100
+    q1, q2 = st.columns(2)
+    q1.metric("Rows",    f"{rows:,}")
+    q2.metric("Cols",    f"{len(df.columns)}")
+    q1.metric("File MB", f"{mb:.1f}")
+    q2.metric("RAM MB",  f"{mem_mb:.1f}")
+    nc = "#ef4444" if null_pct > 20 else "#f59e0b" if null_pct > 5 else "#00e5a0"
+    st.markdown(
+        f'<div style="font-size:11px;font-family:monospace;color:{nc};margin:4px 0">' +
+        f'Null rate: {null_pct:.1f}%</div>',
+        unsafe_allow_html=True,
+    )
+    if rows > 200_000:
+        st.warning(f"⚠️ Large dataset ({rows:,} rows). Some charts sampled.")
+    elif rows > 50_000:
+        st.info(f"ℹ️ {rows:,} rows — paginated views active.")
+    audit_log = st.session_state.get("_audit_log", [])
+    if audit_log:
+        with st.expander(f"🪵 Audit log ({len(audit_log)} events)", expanded=False):
+            for entry in reversed(audit_log[-20:]):
+                st.markdown(
+                    f'<div style="font-family:monospace;font-size:10px;color:#64748b;padding:2px 0">' +
+                    f'<span style="color:#0ea5e9">{entry["ts"]}</span> ' +
+                    f'<b style="color:#e2e8f0">{entry["action"]}</b> ' +
+                    entry["detail"] +
+                    (f' ({entry["rows"]:,} rows)' if entry["rows"] else "") +
+                    (f' — {entry["ms"]:.0f}ms' if entry["ms"] else "") +
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+
+
+
 # ── Production sidebar: data quality panel ─────────────────────────────────
 with st.sidebar:
     _render_sidebar_perf(s, df)
@@ -3388,7 +3429,7 @@ with tab_repeat:
                 pass
             return ""
 
-        st.dataframe(grp_df.style.applymap(highlight_v, subset=["visits"]),
+        st.dataframe(grp_df.style.map(highlight_v, subset=["visits"]),
                      use_container_width=True, height=360)
 
         st.markdown('<div class="sec-head">Detailed Repeat Visit Records</div>', unsafe_allow_html=True)
@@ -4950,7 +4991,7 @@ with tab_dataprep:
             return "color:#64748b"
 
         st.dataframe(
-            _prof_df.style.applymap(_highlight_confidence, subset=["Confidence"]),
+            _prof_df.style.map(_highlight_confidence, subset=["Confidence"]),
             use_container_width=True, height=320,
         )
 
@@ -5114,45 +5155,6 @@ with tab_dataprep:
 # PRODUCTION SIDEBAR ADDITIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _render_sidebar_perf(s: dict, df: pd.DataFrame):
-    """Render performance and data quality info in sidebar."""
-    st.markdown("---")
-    st.markdown("**📊 Data Quality**")
-    mb      = s.get("source_mb", 0)
-    rows    = s.get("total_rows", len(df))
-    mem_mb  = df.memory_usage(deep=True).sum() / 1_048_576
-    null_pct = df.isna().mean().mean() * 100
-    q1, q2 = st.columns(2)
-    q1.metric("Rows",    f"{rows:,}")
-    q2.metric("Cols",    f"{len(df.columns)}")
-    q1.metric("File MB", f"{mb:.1f}")
-    q2.metric("RAM MB",  f"{mem_mb:.1f}")
-    nc = "#ef4444" if null_pct > 20 else "#f59e0b" if null_pct > 5 else "#00e5a0"
-    st.markdown(
-        f'<div style="font-size:11px;font-family:monospace;color:{nc};margin:4px 0">' +
-        f'Null rate: {null_pct:.1f}%</div>',
-        unsafe_allow_html=True,
-    )
-    if rows > 200_000:
-        st.warning(f"⚠️ Large dataset ({rows:,} rows). Some charts sampled.")
-    elif rows > 50_000:
-        st.info(f"ℹ️ {rows:,} rows — paginated views active.")
-    audit_log = st.session_state.get("_audit_log", [])
-    if audit_log:
-        with st.expander(f"🪵 Audit log ({len(audit_log)} events)", expanded=False):
-            for entry in reversed(audit_log[-20:]):
-                st.markdown(
-                    f'<div style="font-family:monospace;font-size:10px;color:#64748b;padding:2px 0">' +
-                    f'<span style="color:#0ea5e9">{entry["ts"]}</span> ' +
-                    f'<b style="color:#e2e8f0">{entry["action"]}</b> ' +
-                    entry["detail"] +
-                    (f' ({entry["rows"]:,} rows)' if entry["rows"] else "") +
-                    (f' — {entry["ms"]:.0f}ms' if entry["ms"] else "") +
-                    '</div>',
-                    unsafe_allow_html=True,
-                )
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # UPGRADED RULES ENGINE TAB  — production UI with 15 rules + paginated results
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5239,7 +5241,7 @@ with tab_rules:
             ], columns=["ID","Rule","Category","Score","Severity","Evidence Base"])
             def _sev_c(v):
                 return {"HIGH":"color:#ef4444;font-weight:bold","MEDIUM":"color:#f59e0b;font-weight:bold"}.get(v,"color:#64748b")
-            st.dataframe(_rref.style.applymap(_sev_c, subset=["Severity"]),
+            st.dataframe(_rref.style.map(_sev_c, subset=["Severity"]),
                 use_container_width=True, height=480)
 
         if _re_run or "re_results" in st.session_state:
