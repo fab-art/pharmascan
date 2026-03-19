@@ -5,7 +5,7 @@ Install:
     pip install streamlit pandas matplotlib networkx openpyxl odfpy
 
 Run:
-    streamlit run pharmascan_streamlit.py
+    streamlit run app.py
 """
 
 import difflib
@@ -155,7 +155,7 @@ COLUMN_MAP = {
 # Adds: paginate_df, audit_log, export_rules_excel, statistical rules R11-R15
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import logging as _logging, time as _time, math as _math, hashlib as _hashlib
+import logging as _logging, time as _time, math as _math
 
 # ── Production logger ─────────────────────────────────────────────────────────
 _LOG = _logging.getLogger("pharmascan")
@@ -649,8 +649,6 @@ def run_rules_engine(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     W = df.copy()
     W["_idx"]   = np.arange(n)
     W["_score"] = 0
-    W["_rules"] = ""           # "R01(+35); R03(+25)"
-    W["_rsns"]  = ""           # human-readable reasons
 
     # Safe helpers — avoid NaN propagation in string columns
     def _sstr(col):
@@ -669,8 +667,6 @@ def run_rules_engine(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     s_doc   = _sstr(doc_type).str.upper()
     s_pid   = _sstr(id_col)
     s_amt   = _sfloat(amt_col)
-    s_vou   = _sstr(vou_col)
-    s_fac   = _sstr(fac_col).str.upper()
     s_date  = pd.to_datetime(W[date_col], errors="coerce") if date_col else pd.Series(pd.NaT, index=W.index)
 
     # ── 3. Merge drug reference (left join on drug_code) ──────────────────
@@ -798,12 +794,10 @@ def run_rules_engine(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     # ── R05: Antineoplastic Without Cancer Dx ─────────────────────────
     if has_dx.any():
-        is_l01      = atc3.str.startswith("L01")
-        cancer_dx   = s_dx.str.startswith("C") | (
-            s_dx.str.startswith("D") &
-            s_dx.str[1:3].str.match(r"^\d\d$") &
-            (s_dx.str[1:3].astype(str).apply(
-                lambda x: int(x) <= 49 if x.isdigit() else False))
+        is_l01    = atc3.str.startswith("L01")
+        _d_part   = pd.to_numeric(s_dx.str[1:3], errors="coerce")
+        cancer_dx = s_dx.str.startswith("C") | (
+            s_dx.str.startswith("D") & _d_part.notna() & (_d_part <= 49)
         )
         _apply("R05", is_l01 & has_dx & ~cancer_dx, 25,
                "Cytotoxic (L01) without cancer diagnosis")
@@ -1037,7 +1031,6 @@ def export_rules_excel(out_df: pd.DataFrame, summary: dict,
         Border as _B, Side as _S,
     )
     from openpyxl.utils import get_column_letter as _gcl
-    from openpyxl.chart import BarChart as _BC, Reference as _Ref
 
     THIN = _S(border_style="thin", color="CCCCCC")
     BDR  = _B(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -1205,132 +1198,6 @@ def export_rules_excel(out_df: pd.DataFrame, summary: dict,
     _audit("EXPORT_EXCEL", f"5-sheet report, {len(out_df):,} rows", len(out_df))
     return buf.read()
 
-
-# ── Legacy definitions below (shadowed by production versions above) ──
-@st.cache_data(show_spinner=False)
-def load_and_process(file_bytes: bytes, filename: str, rapid_days: int):
-    fname = filename.lower()
-    if fname.endswith(".csv"):
-        df = pd.read_csv(io.BytesIO(file_bytes), encoding="utf-8", on_bad_lines="skip")
-    elif fname.endswith((".xlsx", ".xls")):
-        df = pd.read_excel(io.BytesIO(file_bytes))
-    elif fname.endswith(".ods"):
-        df = pd.read_excel(io.BytesIO(file_bytes), engine="odf")
-    else:
-        raise ValueError("Unsupported file type. Use CSV, XLSX, XLS, or ODS.")
-
-    # Normalise column names
-    renamed, used = {}, {}
-    for col in df.columns:
-        key = re.sub(r"[^a-z0-9]", "_", col.lower().strip())
-        key = re.sub(r"_+", "_", key).strip("_")
-        matched = False
-        for pattern, target in COLUMN_MAP.items():
-            if re.fullmatch(pattern, key):
-                if target not in used:
-                    renamed[col] = target
-                    used[target] = col
-                    matched = True
-                break
-        if not matched:
-            renamed[col] = key
-    df = df.rename(columns=renamed)
-
-    # Parse dates
-    if "visit_date" in df.columns:
-        df["visit_date"] = pd.to_datetime(df["visit_date"], errors="coerce")
-    else:
-        for col in df.columns:
-            if df[col].dtype == object:
-                try:
-                    parsed = pd.to_datetime(df[col], errors="coerce")
-                    if parsed.notna().sum() > len(df) * 0.5:
-                        df["visit_date"] = parsed
-                        break
-                except Exception:
-                    pass
-
-    # Summary stats
-    s = {"total_rows": len(df), "columns": list(df.columns)}
-    id_col = "patient_id" if "patient_id" in df.columns else "patient_name" if "patient_name" in df.columns else None
-    if id_col:
-        vc = df[id_col].value_counts()
-        s["patient_col"]     = id_col
-        s["unique_patients"] = int(df[id_col].nunique())
-        s["repeat_patients"] = int((vc > 1).sum())
-        s["max_visits"]      = int(vc.max())
-        s["top_patients"]    = vc.head(15).rename_axis("id").reset_index(name="visits")
-    dcol = "doctor_name" if "doctor_name" in df.columns else "doctor_id" if "doctor_id" in df.columns else None
-    if dcol:
-        dvc = df[dcol].value_counts()
-        s["unique_doctors"] = int(df[dcol].nunique())
-        s["top_doctors"]    = dvc.head(15).rename_axis("doctor").reset_index(name="visits")
-        s["doctor_col"]     = dcol
-    if "visit_date" in df.columns:
-        v = df["visit_date"].dropna()
-        if len(v):
-            s["date_min"] = str(v.min().date())
-            s["date_max"] = str(v.max().date())
-    if "facility" in df.columns:
-        fvc = df["facility"].value_counts()
-        s["unique_facilities"] = int(df["facility"].nunique())
-        s["top_facilities"]    = fvc.head(10).rename_axis("name").reset_index(name="visits")
-    for amt_col in ["amount", "medicine_cost", "insurance_copay", "patient_copay"]:
-        if amt_col in df.columns:
-            df[amt_col] = pd.to_numeric(df[amt_col], errors="coerce")
-    if "amount" in df.columns:
-        s["total_amount"] = round(float(df["amount"].sum()), 2)
-        s["avg_amount"]   = round(float(df["amount"].mean()), 2)
-
-    # Repeat visits
-    repeat_groups, repeat_detail = [], pd.DataFrame()
-    if id_col:
-        vc2 = df[id_col].value_counts()
-        repeat_ids = vc2[vc2 > 1].index.tolist()
-        rdf = df[df[id_col].isin(repeat_ids)].copy()
-        if "visit_date" in rdf.columns:
-            rdf = rdf.sort_values([id_col, "visit_date"])
-        repeat_detail = rdf.head(500)
-        for pid in repeat_ids[:300]:
-            grp = df[df[id_col] == pid]
-            entry = {id_col: str(pid), "visits": int(len(grp))}
-            if "patient_name" in grp.columns and id_col != "patient_name":
-                entry["patient_name"] = str(grp["patient_name"].iloc[0])
-            if "visit_date" in grp.columns:
-                dates = grp["visit_date"].dropna().sort_values()
-                entry["dates"] = ", ".join(str(d.date()) for d in dates if pd.notna(d))
-            repeat_groups.append(entry)
-        repeat_groups.sort(key=lambda x: x["visits"], reverse=True)
-
-    # Rapid revisits
-    rapid = []
-    if id_col and "visit_date" in df.columns:
-        cols = [id_col, "visit_date"]
-        if "patient_name" in df.columns and id_col != "patient_name":
-            cols.append("patient_name")
-        if dcol:
-            cols.append(dcol)
-        sub = df[cols].dropna(subset=[id_col, "visit_date"]).sort_values([id_col, "visit_date"])
-        for pid, grp in sub.groupby(id_col):
-            dates = grp["visit_date"].tolist()
-            for i in range(len(dates) - 1):
-                diff = (dates[i + 1] - dates[i]).days
-                if 0 < diff <= rapid_days:
-                    name = str(grp["patient_name"].iloc[0]) if "patient_name" in grp.columns else str(pid)
-                    rapid.append({
-                        "patient_id":   str(pid),
-                        "patient_name": name,
-                        "visit_1":      str(dates[i].date()),
-                        "visit_2":      str(dates[i + 1].date()),
-                        "days_apart":   diff,
-                        "doctor":       str(grp[dcol].iloc[0]) if dcol else "—",
-                    })
-        rapid.sort(key=lambda x: x["days_apart"])
-
-    return df, renamed, s, repeat_groups, repeat_detail, rapid
-
-
-# ── Chart helpers ─────────────────────────────────────────────────────────────
 
 def hbar_chart(labels, values, color, title, xlabel):
     fig, ax = plt.subplots(figsize=(7, max(2.5, len(labels) * 0.42)))
@@ -1894,98 +1761,6 @@ def _match_score(a: str, b: str):
     return 0.0, "none"
 
 
-def detect_name_clusters(names: list, counts: dict) -> list[dict]:
-    """
-    Cluster similar names using Union-Find.
-    Returns list of dicts:
-      { "canonical": str, "variants": [str,...], "method": str, "confidence": float }
-    Only clusters with ≥2 members are returned.
-    """
-    parent = {n: n for n in names}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        pa, pb = find(a), find(b)
-        if pa != pb:
-            if len(_toks(pa)) >= len(_toks(pb)):
-                parent[pb] = pa
-            else:
-                parent[pa] = pb
-
-    # ── Pass 1: merge multi-token names (typos + reordering) ─────────────────
-    multi = [n for n in names if len(_toks(n)) >= 2]
-    for i, a in enumerate(multi):
-        for b in multi[i + 1:]:
-            sc, why = _match_score(a, b)
-            if sc > 0 and why != "none":
-                union(a, b)
-
-    # ── Pass 2: single-token names → merge only if token is unique to 1 cluster ──
-    def get_clusters():
-        c = _dd(list)
-        for n in names:
-            c[find(n)].append(n)
-        return c
-
-    cls1 = get_clusters()
-    tok_to_roots: dict = _dd(set)
-    for root, members in cls1.items():
-        if len(members) > 1:
-            for m in members:
-                for t in _toks(m):
-                    tok_to_roots[t].add(root)
-
-    for name in names:
-        if len(_toks(name)) != 1:
-            continue
-        tok = next(iter(_toks(name)))
-        candidates = tok_to_roots.get(tok, set()) - {find(name)}
-        if len(candidates) == 1:
-            union(name, next(iter(candidates)))
-
-    # ── Build final clusters ─────────────────────────────────────────────────
-    final: dict = _dd(list)
-    for n in names:
-        final[find(n)].append(n)
-
-    def best_canonical(members):
-        def score(n):
-            tc   = len(_toks(n))
-            freq = counts.get(n, 0)
-            # Title-case preferred; "Dr " prefix demoted
-            titled  = n == n.title()
-            no_pfx  = not re.match(r"^(Dr|DR)\s", n)
-            return (tc, no_pfx, titled, freq, len(n))
-        return max(members, key=score)
-
-    results = []
-    for root, members in final.items():
-        if len(members) < 2:
-            continue
-        canon = best_canonical(members)
-        variants = [m for m in members if m != canon]
-        # Compute overall confidence
-        scores = [_match_score(canon, v)[0] for v in variants]
-        conf   = round(sum(scores) / len(scores), 3) if scores else 1.0
-        # Flag suspicious: variant shares NO token with canonical
-        ct = _toks(canon)
-        suspicious = any(not (_toks(v) & ct) for v in variants)
-        results.append({
-            "canonical":  canon,
-            "variants":   sorted(variants, key=lambda x: (-counts.get(x, 0), -len(x))),
-            "confidence": conf,
-            "suspicious": suspicious,
-            "count":      len(members),
-        })
-    results.sort(key=lambda x: (-x["count"], -x["confidence"]))
-    return results
-
-
 def apply_name_normalisation(df: pd.DataFrame, col: str,
                               approved_clusters: list[dict]) -> pd.DataFrame:
     """Apply approved rename clusters to a column in a copy of df."""
@@ -2406,258 +2181,6 @@ _PRESCRIBER_ALLOWED = {
     "SPEC":    {"*specialist*"},   # any registered specialist
     "HU":      {"*hospital*"},     # hospital/inpatient only
 }
-
-
-def _atc_prefix(code: str, n: int) -> str:
-    return str(code).strip()[:n].upper()
-
-
-def run_rules_engine(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """
-    Run all in-memory fraud rules against the dataframe.
-    Returns (results_df, summary_stats).
-
-    Results df has one row per original claim with:
-      _score, _decision, _rules_fired, _risk_level
-    """
-    ref = _load_drug_ref()
-    drugs_ref = ref["drugs"]
-    atc3_ref  = ref["atc3_defaults"]
-
-    # Identify available columns
-    def _col(*names):
-        for n in names:
-            if n in df.columns:
-                return n
-        return None
-
-    id_col    = _col("patient_id", "patient_name")
-    date_col  = _col("visit_date")
-    drug_col  = _col("drug_code")
-    drug_nm   = _col("drug_name")
-    qty_col   = _col("quantity")
-    dx_col    = _col("diagnosis")
-    doc_col   = _col("doctor_name")
-    doc_type  = _col("doctor_type")
-    fac_col   = _col("facility")
-    amt_col   = _col("insurance_copay", "amount")
-    vou_col   = _col("voucher_id")
-
-    rows_out = []
-    summary = {
-        "total": len(df),
-        "rule_counts": {f"R{i:02d}": 0 for i in range(1, 11)},
-        "decisions": {"APPROVE": 0, "FLAG": 0, "HOLD": 0, "BLOCK": 0},
-        "total_flagged_amount": 0.0,
-        "rules_available": [],
-    }
-
-    # Determine which rules can run
-    if drug_col:  summary["rules_available"] += ["R01","R02","R03","R04","R07","R08","R09"]
-    if dx_col:    summary["rules_available"] += ["R02","R05","R06","R09"]
-    if qty_col:   summary["rules_available"] += ["R03"]
-    if date_col and id_col: summary["rules_available"] += ["R10"]
-    summary["rules_available"] = sorted(set(summary["rules_available"]))
-
-    # Pre-build refill index: {(patient_id, drug_code): [sorted dates]}
-    refill_index = {}
-    if id_col and drug_col and date_col:
-        sub = df[[id_col, drug_col, date_col]].dropna()
-        for _, row in sub.iterrows():
-            key = (str(row[id_col]).strip(), str(row[drug_col]).strip())
-            dt  = pd.to_datetime(row[date_col], errors="coerce")
-            if pd.notna(dt):
-                refill_index.setdefault(key, []).append(dt)
-        for key in refill_index:
-            refill_index[key].sort()
-
-    for idx, row in df.iterrows():
-        score    = 0
-        fired    = []
-
-        def fire(rule_id, s, reason, evidence=""):
-            nonlocal score
-            score += s
-            fired.append({"id": rule_id, "score": s,
-                          "reason": reason[:120],
-                          "evidence": str(evidence)[:80]})
-            summary["rule_counts"][rule_id] = summary["rule_counts"].get(rule_id, 0) + 1
-
-        # Get row values
-        d_code  = str(row[drug_col]).strip() if drug_col and pd.notna(row.get(drug_col)) else ""
-        d_name  = str(row[drug_nm]).strip()  if drug_nm  and pd.notna(row.get(drug_nm))  else ""
-        qty     = float(row[qty_col])        if qty_col  and pd.notna(row.get(qty_col))  else None
-        dx      = str(row[dx_col]).strip()[:3].upper() if dx_col and pd.notna(row.get(dx_col)) else ""
-        doc     = str(row[doc_type]).strip() if doc_type and pd.notna(row.get(doc_type)) else ""
-        fac     = str(row[fac_col]).strip()  if fac_col  and pd.notna(row.get(fac_col))  else ""
-        amt     = float(row[amt_col])        if amt_col  and pd.notna(row.get(amt_col))  else 0.0
-        pid     = str(row[id_col]).strip()   if id_col   and pd.notna(row.get(id_col))   else ""
-        vou     = str(row[vou_col]).strip()  if vou_col  and pd.notna(row.get(vou_col))  else ""
-
-        # Look up drug info
-        drug_info = drugs_ref.get(d_code)
-        if not drug_info and d_code:
-            drug_info = atc3_ref.get(d_code[:3])
-
-        atc1 = (drug_info["atc1"] if drug_info else d_code[:1]).upper()
-        atc3 = (drug_info["atc3"] if drug_info else d_code[:3]).upper()
-        instr = (drug_info["instr"] if drug_info else "").strip()
-        price = drug_info["price"] if drug_info else 0.0
-        max_u = drug_info.get("max_units") if drug_info else None
-        min_r = drug_info.get("min_refill") if drug_info else None
-
-        # ── R01: Drug-Prescriber Mismatch ────────────────────────────────────
-        if d_code and instr and doc:
-            doc_up = doc.upper()
-            instr_parts = {p.strip().upper() for p in re.split(r"[\s,]+", instr)
-                           if p.strip()}
-            # Hospital-use drugs at non-hospital providers
-            if "HU" in instr_parts:
-                if not any(x in doc_up for x in
-                           ("HOSPITAL","INTERN","SPECIALIST","SPEC","SENIOR")):
-                    fire("R01", 35, f"HU-restricted drug by non-hospital provider",
-                         f"{d_code}|{instr}|{doc[:30]}")
-            # PSYCH-restricted drugs by non-psychiatrist
-            elif "PSYCH" in instr_parts:
-                if not any(x in doc_up for x in ("PSYCH","NEUROL","SPECIALIST","SPEC")):
-                    fire("R01", 25, f"PSYCH-restricted drug by {doc[:25]}",
-                         f"{d_code}|{instr}")
-            # AC (oncology) drugs
-            elif "AC" in instr_parts and "AC" not in {"DAC"}:
-                if not any(x in doc_up for x in ("ONCOL","CANCER","HAEMATOL","SPECIALIST","SPEC")):
-                    fire("R01", 30, f"Oncology-only drug by non-oncologist {doc[:20]}",
-                         f"{d_code}|{instr}")
-            # OPHT drugs
-            elif "OPHT" in instr_parts:
-                if "OPHTH" not in doc_up and "EYE" not in doc_up and "SPEC" not in doc_up:
-                    fire("R01", 20, f"OPHT drug by non-ophthalmologist",
-                         f"{d_code}|{instr}|{doc[:20]}")
-
-        # ── R02: Diagnosis-Drug Mismatch ─────────────────────────────────────
-        if dx and d_code:
-            if dx in _DX_DRUG_BLACKLIST:
-                for atc_pref, (s, reason) in _DX_DRUG_BLACKLIST[dx].items():
-                    if atc1 == atc_pref[:1] and (len(atc_pref) == 1 or
-                                                   atc3.startswith(atc_pref)):
-                        fire("R02", s, reason, f"ICD:{dx} + {d_code}({atc_pref})")
-                        break
-
-        # ── R03: Drug Quantity Excess ─────────────────────────────────────────
-        if qty and max_u:
-            if float(qty) > float(max_u):
-                excess_pct = (float(qty) - float(max_u)) / float(max_u) * 100
-                s = min(25 + int(excess_pct / 20) * 5, 60)
-                fire("R03", s,
-                     f"Quantity {qty:.0f} > max {max_u} ({excess_pct:.0f}% excess)",
-                     f"{d_code}|qty:{qty}|max:{max_u}")
-
-        # ── R04: Restricted Drug – High Value + No Indication ─────────────────
-        if price > 50000 and dx:
-            atc1_dx_ok = {
-                "L": {"C", "D", "N", "G", "M"},   # antineoplastics need cancer/relevant dx
-                "B": {"D", "N", "K"},              # erythropoietin needs haem/renal
-            }
-            if atc1 in atc1_dx_ok:
-                expected_dx_firsts = atc1_dx_ok[atc1]
-                if dx[:1] not in expected_dx_firsts:
-                    fire("R04", 30,
-                         f"High-value drug ({price:,.0f} RWF) with unrelated diagnosis {dx}",
-                         f"{d_code}|price:{price:,.0f}|dx:{dx}")
-
-        # ── R05: Antineoplastic Without Cancer Diagnosis ──────────────────────
-        if atc1 == "L" and atc3.startswith("L01"):
-            is_cancer_dx = (
-                dx.startswith("C") or
-                (dx.startswith("D") and dx[1:3].isdigit() and int(dx[1:3]) <= 49)
-            )
-            if dx and not is_cancer_dx:
-                fire("R05", 25,
-                     f"Cytotoxic drug without cancer diagnosis (ICD:{dx})",
-                     f"{d_code}|dx:{dx}")
-
-        # ── R06: Psychiatric Drug Without Mental Health Diagnosis ─────────────
-        if "PSYCH" in instr.upper() and dx:
-            is_mental = (dx.startswith("F") or
-                         (dx.startswith("G4") and len(dx) >= 3 and "0" <= dx[2] <= "7"))
-            if not is_mental:
-                fire("R06", 20,
-                     f"PSYCH drug without psychiatric/neuro diagnosis (ICD:{dx})",
-                     f"{d_code}|instr:{instr}|dx:{dx}")
-
-        # ── R07: Duplicate / Early Refill ─────────────────────────────────────
-        if pid and d_code and min_r and date_col:
-            key = (pid, d_code)
-            dates = refill_index.get(key, [])
-            if len(dates) >= 2:
-                cur_dt = pd.to_datetime(row.get(date_col), errors="coerce")
-                if pd.notna(cur_dt):
-                    # Find most recent prior dispense
-                    prior = [d for d in dates if d < cur_dt]
-                    if prior:
-                        gap = (cur_dt - max(prior)).days
-                        if gap < min_r:
-                            fire("R07", 40,
-                                 f"Refill {gap}d after last dispense (min:{min_r}d)",
-                                 f"{d_code}|gap:{gap}d|min:{min_r}d")
-
-        # ── R08: Zero-Tariff Procedure or Unlisted Drug ───────────────────────
-        if d_code and not drug_info and d_code.upper().startswith("RHIC"):
-            fire("R08", 15,
-                 f"Procedure {d_code} not found in RAMA tariff",
-                 f"{d_code}")
-
-        # ── R09: Malaria + Multiple Antibiotics ───────────────────────────────
-        # (checked at patient-visit level below in post-processing)
-
-        # ── R10: Immunosuppressant Without Valid Indication ───────────────────
-        if atc3.startswith("L04") and dx:
-            valid = any(dx.startswith(p) for p in
-                        ("T86","M0","M1","M2","M3","K50","K51","K52","N04","L40","L41","G35"))
-            if not valid:
-                fire("R10", 20,
-                     f"Immunosuppressant without transplant/autoimmune dx ({dx})",
-                     f"{d_code}|dx:{dx}")
-
-        # ── Scoring → decision ─────────────────────────────────────────────────
-        if score >= 75:   decision = "BLOCK"
-        elif score >= 50: decision = "HOLD"
-        elif score >= 30: decision = "FLAG"
-        else:             decision = "APPROVE"
-
-        if score >= 75:   risk = "CRITICAL"
-        elif score >= 50: risk = "HIGH"
-        elif score >= 30: risk = "MEDIUM"
-        else:             risk = "LOW"
-
-        summary["decisions"][decision] += 1
-        if decision in ("HOLD", "BLOCK"):
-            summary["total_flagged_amount"] += amt
-
-        rows_out.append({
-            "_score":     score,
-            "_risk":      risk,
-            "_decision":  decision,
-            "_rules_fired": "; ".join(
-                f"{r['id']}(+{r['score']})" for r in fired
-            ) if fired else "—",
-            "_reasons":    " | ".join(r["reason"] for r in fired) if fired else "—",
-            "_n_rules":    len(fired),
-        })
-
-    results = pd.DataFrame(rows_out, index=df.index)
-    out_df = pd.concat([df, results], axis=1)
-
-    summary["flagged_count"] = (
-        summary["decisions"]["FLAG"] +
-        summary["decisions"]["HOLD"] +
-        summary["decisions"]["BLOCK"]
-    )
-    summary["rules_with_most_fires"] = sorted(
-        [(k, v) for k, v in summary["rule_counts"].items() if v > 0],
-        key=lambda x: -x[1]
-    )[:5]
-
-    return out_df, summary
 
 
 
