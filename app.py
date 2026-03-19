@@ -28,6 +28,12 @@ tabs/
   tab_rules.py
 """
 
+import os
+import sys
+
+# ── Ensure the app directory is on the path (required on Streamlit Cloud) ─────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import streamlit as st
 
 # ── Local modules ──────────────────────────────────────────────────────────────
