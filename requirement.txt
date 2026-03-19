@@ -1,7 +1,16 @@
-streamlit
-pandas
-matplotlib
-networkx
-openpyxl
-odfpy
-numpy
+# PharmaScan — Streamlit Cloud requirements
+# Generated for Python 3.11/3.12 compatibility
+# Last verified: March 2026
+
+# ── Core data stack ───────────────────────────────────────────────────────────
+pandas>=2.1.0          # 2.1+ required for Styler.map(); 3.x supported
+numpy>=1.26.0          # numpy 2.x supported
+matplotlib>=3.7.0
+networkx>=3.1
+
+# ── Excel / ODS support ───────────────────────────────────────────────────────
+openpyxl>=3.1.0        # .xlsx read/write + report generation
+odfpy>=1.4.1           # .ods file support (pandas engine='odf')
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+streamlit>=1.32.0      # 1.32+ for st.progress(text=...) argument
